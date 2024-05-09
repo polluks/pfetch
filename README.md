@@ -26,7 +26,7 @@ picture"!
 ## OS support
 
 - **Linux**
-    - Alpine Linux, Arch Linux, Arco Linux, Artix Linux, AmogOS, CentOS, Dahlia, Debian, Devuan, Elementary, EndeavourOS, EvolutionOS, Fedora, Garuda Linux, Gentoo, Guix, Hyperbola, instantOS, KISS Linux, Linux Lite, Linux Mint, Mageia, Manjaro, MX Linux, NixOS, OpenSUSE, Parabola, Pop!\_OS, PureOS, Slackware, Solus, Ubuntu and Void Linux.
+    - Alma Linux, Alpine Linux, Arch Linux, Arco Linux, Artix Linux, AmogOS, CentOS, Dahlia, Debian, Devuan, Elementary, EndeavourOS, EvolutionOS, Fedora, Garuda Linux, Gentoo, Guix, Hyperbola, instantOS, KISS Linux, Linux Lite, Linux Mint, Mageia, Manjaro, MX Linux, NixOS, Nobara, OpenSUSE, Oracle, Parabola, Pop!\_OS, PureOS, Slackware, Solus, SteamOS, Ubuntu, Vanilla OS and Void Linux.
     - All other distributions are supported with a generic penguin logo.
 - **Android**
 - **BSD**
@@ -40,6 +40,9 @@ picture"!
 - **IRIX**
 - **SerenityOS**
 - **MorphOS**
+- **Hurd**
+    - Arch Hurd, Debian
+    - All other distributions are supported with a generic Hurd logo.
 
 ## Configuration
 
@@ -49,9 +52,9 @@ picture"!
 # Which information to display.
 # NOTE: If 'ascii' will be used, it must come first.
 # Default: first example below
-# Valid: space separated string
+# Valid: space separated string, or 'all'
 #
-# OFF by default: shell editor wm de palette
+# OFF by default: shell editor wm de palette disk term resolution
 PF_INFO="ascii title os host kernel uptime pkgs memory"
 
 # Example: Only ASCII.
@@ -121,6 +124,12 @@ SHELL=""
 # Which desktop environment to display.
 XDG_CURRENT_DESKTOP=""
 
+# Override the value of os
+PF_OS=""
+
+# Override the value of host
+PF_HOST=""
+
 # Show/Hide Package Manager names (like neofetch)
 # Default: off
 # Valid: on, off
@@ -131,16 +140,18 @@ PF_PACKAGE_MANAGERS=1
 
 # Disable individial package managers
 # Default: unset (none)
-# Valid: package manager name (first arguement passed to the get_single_pkg function)
+# Valid: package manager name (first arguement passed to the count_single_pkg function)
 PF_DISABLED_PACKAGE_MANAGERS=""
 
-# Override detected distro
-# Default unset (auto)
-# Valid: string (distro name)
-PF_DISTRO=""
+# Mount point for the disk you want to display in disk info
+# Default: '/' (except on iOS where it is /private/var, and on Android where it is /data)
+# Valid: string
+PF_DISKPATH="/"
 ```
 
 ## Credit
 
 - [ufetch](https://gitlab.com/jschx/ufetch): Lots of ASCII logos.
     - Contrary to the belief of a certain youtuber, `pfetch` shares **zero** code with `ufetch`. Only some of the ASCII logos were used.
+
+- [pfetch-rs](https://github.com/Gobidev/pfetch-rs): Some ASCII logos.

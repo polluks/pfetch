@@ -52,6 +52,9 @@ esc_p() {
 # against aliases and functions.
 has() {
     _cmd=$(command -v "$1") 2>/dev/null || return 1
+    # busybox-w32's shell doesn't return a full path for builtin applets,
+    # causing a false negative. This is a workaround for that.
+    [ "$os" = "Windows_NT" ] && return 0
     [ -x "$_cmd" ] || return 1
 }
 
@@ -99,7 +102,7 @@ log() {
     # and it allows for easy swapping of info order and amount.
     #
     # $[2] ___      $[3] goldie@KISS
-    # $[4](.· |     $[5] os KISS Linux
+    # $[4](.. |     $[5] os KISS Linux
     #     (<> |
     #    / __  \
     #   ( /  \ /|
@@ -159,26 +162,43 @@ log() {
     info_height=$((${info_height:-0} + 1))
 }
 
+wmic_read() {
+    # This function is used to remove useless garbage from wmic output.
+    {
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                # skip if the line starts with whitespace
+                case $line in
+                    [[:space:]]*) continue ;;
+                esac
+                # remove trailing whitespace
+                printf '%s\n' "${line%"${line##*[![:space:]]}"}"
+            fi
+        done
+    } <<-EOF
+        $(wmic "$@")
+	EOF
+}
+
 get_title() {
     # Username is retrieved by first checking '$USER' with a fallback
     # to the 'id -un' command.
     user=${USER:-$(id -un)}
 
     # Hostname is retrieved by first checking '$HOSTNAME' with a fallback
-    # to the 'hostname' command.
-    #
-    # Disable the warning about '$HOSTNAME' being undefined in POSIX sh as
-    # the intention for using it is allowing the user to overwrite the
-    # value on invocation.
-    # shellcheck disable=3028,2039
-    hostname=${HOSTNAME:-${hostname:-$(hostname)}}
-
-    # If the hostname is still not found, fallback to the contents of the
-    # /etc/hostname file.
-    [ -n "$hostname" ] || read -r hostname < /etc/hostname
-
-    # If the hostname is STILL not found, set it as "unknown"
-    [ -n "$hostname" ] || hostname="unknown"
+    # to the 'hostname' command, then to the '/etc/hostname' file, and finally
+    # to 'unknown'.
+    if [ -z "$hostname" ]; then
+        if [ -n "$HOSTNAME" ]; then
+            hostname="$HOSTNAME"
+        elif has hostname; then
+            hostname=$(hostname)
+        elif [ -r /etc/hostname ]; then
+            read -r hostname < /etc/hostname
+        else
+            hostname="unknown"
+        fi
+    fi
 
     # Add escape sequences for coloring to user and host name unless $PF_COL3=COL1. As we embed
     # them directly in the arguments passed to log(), we cannot use esc_p().
@@ -206,19 +226,17 @@ get_os() {
     #
     # On first run, this function displays _nothing_, only on the second
     # invocation is 'log()' called.
-    [ -n "$distro" ] && {
-        log os "$distro" >&6
+    if [ -n "$distro" ]; then
+        if [ -n "$PF_OS" ]; then
+            log os "$PF_OS" >&6
+        else
+            log os "$distro" >&6
+        fi
         return
-    }
-
-    # allow the user to override the distro name
-    [ -n "$PF_DISTRO" ] && {
-        distro="$PF_DISTRO"
-        return
-    }
+    fi
 
     case $os in
-        (Linux*)
+        (Linux*|GNU*)
             # Some Linux distributions (which are based on others)
             # fail to identify as they **do not** change the upstream
             # distribution's identification packages or files.
@@ -284,68 +302,64 @@ get_os() {
                 ;;
             esac
 
-            # Check to see if Linux is running in Windows 10 under
+            # Check to see if Linux is running in Windows under
             # WSL1 (Windows subsystem for Linux [version 1]) and
             # append a string accordingly.
             #
             # If the kernel version string ends in "-Microsoft",
-            # we're very likely running under Windows 10 in WSL1.
+            # we're very likely running under Windows in WSL1.
             if [ -n "$WSLENV" ]; then
-                distro="${distro}${WSLENV+ on Windows 10 [WSL2]}"
+                distro="${distro}${WSLENV+ on Windows [WSL2]}"
 
-            # Check to see if Linux is running in Windows 10 under
+            # Check to see if Linux is running in Windows under
             # WSL2 (Windows subsystem for Linux [version 2]) and
             # append a string accordingly.
             #
             # This checks to see if '$WSLENV' is defined. This
-            # appends the Windows 10 string even if '$WSLENV' is
+            # appends the Windows string even if '$WSLENV' is
             # empty. We only need to check that is has been _exported_.
             elif [ -z "${kernel%%*-Microsoft}" ]; then
-                distro="$distro on Windows 10 [WSL1]"
+                distro="$distro on Windows [WSL1]"
             fi
         ;;
 
         (CYGWIN*|MSYS*|MINGW*|Windows_NT)
-            # Grab everything after the first instance of
-            # white-space in the command output of 'wmic'.
-            #
-            # The format of 'wmic' is as follows:
-            # Caption=Microsoft Windows 7 Enterprise
-            #
-            # This extracts:    ^^^^^^^^^^^^^^^^^^^^
-            read -r _ distro <<-EOF
-    			$(wmic os get Caption | head -n 2 | tail -n +2)
-			EOF
+            distro=$(wmic_read os get Caption)
         ;;
 
         (Darwin*)
-            # Parse the SystemVersion.plist file to grab the macOS
-            # version. The file is in the following format:
-            #
-            # <key>ProductVersion</key>
-            # <string>10.14.6</string>
-            #
-            # 'IFS' is set to '<>' to enable splitting between the
-            # keys and a second 'read' is used to operate on the
-            # next line directly after a match.
-            #
-            # '_' is used to nullify a field. '_ _ line _' basically
-            # says "populate $line with the third field's contents".
-            while IFS='<>' read -r _ _ line _; do
-                case $line in
-                    # Match 'ProductVersion' and read the next line
-                    # directly as it contains the key's value.
-                    ProductVersion)
-                        IFS='<>' read -r _ _ mac_version _
-                        continue
-                    ;;
+            if has sw_vers; then
+                mac_version=$(sw_vers -productVersion)
+                mac_product=$(sw_vers -productName)
+            else
+                # Parse the SystemVersion.plist file to grab the macOS
+                # version. The file is in the following format:
+                #
+                # <key>ProductVersion</key>
+                # <string>10.14.6</string>
+                #
+                # 'IFS' is set to '<>' to enable splitting between the
+                # keys and a second 'read' is used to operate on the
+                # next line directly after a match.
+                #
+                # '_' is used to nullify a field. '_ _ line _' basically
+                # says "populate $line with the third field's contents".
+                while IFS='<>' read -r _ _ line _; do
+                    case $line in
+                        # Match 'ProductVersion' and read the next line
+                        # directly as it contains the key's value.
+                        ProductVersion)
+                            IFS='<>' read -r _ _ mac_version _
+                            continue
+                        ;;
 
-                    ProductName)
-                        IFS='<>' read -r _ _ mac_product _
-                        continue
-                    ;;
-                esac
-            done < /System/Library/CoreServices/SystemVersion.plist
+                        ProductName)
+                            IFS='<>' read -r _ _ mac_product _
+                            continue
+                        ;;
+                    esac
+                done < /System/Library/CoreServices/SystemVersion.plist
+            fi
 
             # Use the ProductVersion to determine which macOS/OS X codename
             # the system has. As far as I'm aware there's no "dynamic" way
@@ -425,9 +439,10 @@ get_kernel() {
         (*BSD*|Haiku|Minix)
             return
         ;;
+
         # Use wmic to get the OS version
         (CYGWIN*|MSYS*|MINGW*|Windows_NT)
-            kernel=$(wmic os get Version | sed -n 2p)
+            kernel=$(wmic_read os get Version)
         ;;
     esac
 
@@ -436,20 +451,31 @@ get_kernel() {
 }
 
 get_host() {
+    if [ -n "$PF_HOST" ]; then
+        log host "$PF_HOST" >&6
+        return
+    fi
+
     case $os in
         (Linux*)
             # Despite what these files are called, version doesn't
             # always contain the version nor does name always contain
             # the name.
-            read -r name    < /sys/devices/virtual/dmi/id/product_name
-            read -r version < /sys/devices/virtual/dmi/id/product_version
-            read -r model   < /sys/firmware/devicetree/base/model
+            [ -f /sys/devices/virtual/dmi/id/product_name ] && \
+                read -r name < /sys/devices/virtual/dmi/id/product_name
+            [ -f /sys/devices/virtual/dmi/id/product_version ] && \
+                read -r version < /sys/devices/virtual/dmi/id/product_version
+            [ -f /sys/firmware/devicetree/base/model ] && \
+                read -r model < /sys/firmware/devicetree/base/model
 
             host="$name $version $model"
         ;;
 
         (Darwin* | FreeBSD* | DragonFly*)
-            host=$(sysctl -n hw.model)
+            case $distro in
+                iOS*) host=$(uname -m)           ;;
+                *)    host=$(sysctl -n hw.model) ;;
+            esac
         ;;
 
         (NetBSD*)
@@ -465,7 +491,7 @@ get_host() {
             host=$(sysctl -n hw.vendor hw.product)
         ;;
         (CYGWIN*|MSYS*|MINGW*|Windows_NT)
-            host=$(wmic computersystem get model | tail -n +2 | sed 's/.*=//g')
+            host=$(wmic_read computersystem get manufacturer,model)
         ;;
     esac
 
@@ -517,17 +543,17 @@ get_uptime() {
     # converting that data into days, hours and minutes using simple
     # math.
     case $os in
-        (Linux*|Minix*|SerenityOS*|CYGWIN*|MSYS*|MINGW*|Windows_NT|NetBSD*)
-            if ! [ -r /proc/uptime ]; then
+        (Linux*|Minix*|GNU*|SerenityOS*|CYGWIN*|MSYS*|MINGW*|Windows_NT|NetBSD*)
+            if [ -r /proc/uptime ]; then
+                IFS=. read -r s _ < /proc/uptime
+            else
                 boot=$(date -d"$(uptime -s)" +%s)
                 now=$(date +%s)
                 s=$((now - boot))
-            else
-                IFS=. read -r s _ < /proc/uptime
             fi
         ;;
 
-        (Darwin* | *BSD* | DragonFly*)
+        (Darwin*|*BSD*|DragonFly*)
             s=$(sysctl -n kern.boottime)
 
             # Extract the uptime in seconds from the following output:
@@ -599,7 +625,7 @@ get_uptime() {
     log uptime "${uptime:-0m}" >&6
 }
 
-get_single_pkg() {
+count_single_pkg() {
     # This function is used to count the number of packages installed
     # from each individual package manager.
     # The first arguement is the name of the package manager. The second
@@ -638,51 +664,59 @@ get_pkgs() {
     # The output from this is then piped to 'wc -l' to count each
     # line, giving us the total package count of whatever package
     # managers are installed.
+
+    # None of this works if 'wc' isn't installed.
+    has wc || return
+
     case $os in
         (Linux*)
             # Commands which print packages one per line.
-            has bonsai     && get_single_pkg bonsai 0 bonsai list
-            has crux       && get_single_pkg pkginfo 0 pkginfo -i
-            has pacman-key && get_single_pkg pacman 0 pacman -Qq
-            has dpkg       && get_single_pkg dpkg 0 dpkg-query -f '.\n' -W
-            has rpm        && get_single_pkg rpm 0 rpm -qa
-            has xbps-query && get_single_pkg xbps 0 xbps-query -l
-            has apk        && get_single_pkg apk 0 apk info
-            has guix       && get_single_pkg guix 0 guix package --list-installed
-            has opkg       && get_single_pkg opkg 0 opkg list-installed
-            has radula     && get_single_pkg radula 0 radula -ch
-            has flatpak    && get_single_pkg flatpak 0 flatpak list
-            has snap       && get_single_pkg snap 0 snap list
-            has urpmq      && get_single_pkg urpmq 0 urpmq --list-media active
-            has birb       && get_single_pkg birb 0 birb --list-installed
+            has bonsai     && count_single_pkg bonsai 0 bonsai list
+            has crux       && count_single_pkg pkginfo 0 pkginfo -i
+            has pacman-key && count_single_pkg pacman 0 pacman -Qq
+            has dpkg       && count_single_pkg dpkg 0 dpkg-query -f '.\n' -W
+            has rpm        && count_single_pkg rpm 0 rpm -qa
+            has xbps-query && count_single_pkg xbps 0 xbps-query -l
+            has apk        && count_single_pkg apk 0 apk info
+            has guix       && count_single_pkg guix 0 guix package --list-installed
+            has opkg       && count_single_pkg opkg 0 opkg list-installed
+            has radula     && count_single_pkg radula 0 radula -ch
+            has flatpak    && count_single_pkg flatpak 0 flatpak list
+            has snap       && count_single_pkg snap 0 snap list
+            has urpmq      && count_single_pkg urpmq 0 urpmq --list-media active
+            has birb       && count_single_pkg birb 0 birb --list-installed
 
             # Directories containing packages.
-            has kiss       && get_single_pkg kiss 0 printf '%s\n' /var/db/kiss/installed/*/
-            has cpt-list   && get_single_pkg cpt-list 0 printf '%s\n' /var/db/cpt/installed/*/
-            has brew       && get_single_pkg homebrew 0 printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
-            has emerge     && get_single_pkg portage 0 printf '%s\n' /var/db/pkg/*/*/
-            has pkgtool    && get_single_pkg pkgtool 0 printf '%s\n' /var/log/packages/*
-            has eopkg      && get_single_pkg eopkg 0 printf '%s\n' /var/lib/eopkg/package/*
+            has kiss       && count_single_pkg kiss 0 printf '%s\n' /var/db/kiss/installed/*/
+            has cpt-list   && count_single_pkg cpt-list 0 printf '%s\n' /var/db/cpt/installed/*/
+            has brew       && count_single_pkg homebrew 0 printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
+            has emerge     && count_single_pkg portage 0 printf '%s\n' /var/db/pkg/*/*/
+            has pkgtool    && count_single_pkg pkgtool 0 printf '%s\n' /var/log/packages/*
+            has eopkg      && count_single_pkg eopkg 0 printf '%s\n' /var/lib/eopkg/package/*
 
             # 'nix' requires two commands.
-            has nix-store  && get_single_pkg nix sh -c 'nix-store -q --requisites /run/current-system/sw; nix-store -q --requisites ~/.nix-profile'
+            has nix-store  && count_single_pkg nix sh -c 'nix-store -q --requisites /run/current-system/sw; nix-store -q --requisites ~/.nix-profile'
         ;;
 
         (CYGWIN*|MSYS*|MINGW*|Windows_NT)
             # Commands which print packages one per line.
-            has scoop      && get_single_pkg scoop 5 scoop list
-            has winget     && get_single_pkg winget 0 winget list
-            has chocolatey && get_single_pkg chocolatey 0 choco list --local-only
-            has pacman-key && get_single_pkg pacman 0 pacman -Qq
+            has scoop && {
+                scoopapps=$(command -v scoop)
+                scoopapps="${scoopapps%/*}/../apps"
+                count_single_pkg scoop 1 printf '%s\n' "$scoopapps"/*
+            }
+            has winget     && count_single_pkg winget 0 winget list
+            has chocolatey && count_single_pkg chocolatey 0 choco list --local-only
+            has pacman-key && count_single_pkg pacman 0 pacman -Qq
         ;;
 
         (Darwin*)
             # Commands which print packages one per line.
-            has pkgin      && get_single_pkg pkgin 0 pkgin list
-            has dpkg       && get_single_pkg dpkg 0 dpkg-query -f '.\n' -W
+            has pkgin      && count_single_pkg pkgin 0 pkgin list
+            has dpkg       && count_single_pkg dpkg 0 dpkg-query -f '.\n' -W
 
             # Directories containing packages.
-            has brew       && get_single_pkg homebrew 0 printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
+            has brew       && count_single_pkg homebrew 0 printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
 
             # 'port' prints a single line of output to 'stdout'
             # when no packages are installed and exits with
@@ -701,49 +735,49 @@ get_pkgs() {
                     ;;
 
                     (*)
-                        get_single_pkg macports 0 printf '%s' "$pkg_list"
+                        count_single_pkg macports 0 printf '%s' "$pkg_list"
                     ;;
                 esac
             }
         ;;
 
         (FreeBSD*|DragonFly*)
-            get_single_pkg FreeBSD 0 pkg info
+            count_single_pkg FreeBSD 0 pkg info
         ;;
 
         (OpenBSD*)
-            get_single_pkg OpenBSD 0 printf '%s\n' /var/db/pkg/*/
+            count_single_pkg OpenBSD 0 printf '%s\n' /var/db/pkg/*/
         ;;
 
         (NetBSD*)
-            get_single_pkg pkgsrc 0 pkg_info
+            count_single_pkg pkgsrc 0 pkg_info
         ;;
 
         (Haiku)
-            get_single_pkg Haiku 0 printf '%s\n' /boot/system/package-links/*
+            count_single_pkg Haiku 0 printf '%s\n' /boot/system/package-links/*
         ;;
 
         (Minix)
-            get_single_pkg Minix 0 printf '%s\n' /usr/pkg/var/db/pkg/*/
+            count_single_pkg Minix 0 printf '%s\n' /usr/pkg/var/db/pkg/*/
         ;;
 
         (SunOS)
-            has pkginfo && get_single_pkg pkginfo 0 pkginfo -i
-            has pkg     && get_single_pkg pkg 0 pkg list
+            has pkginfo && count_single_pkg pkginfo 0 pkginfo -i
+            has pkg     && count_single_pkg pkg 0 pkg list
         ;;
 
         (IRIX)
-            get_single_pkg IRIX 3 versions -b
+            count_single_pkg IRIX 3 versions -b
         ;;
 
         (SerenityOS)
-            get_single_pkg SerenityOS 0 sh -c "while IFS=" " read -r type _; do [ \"\$type\" != dependency ] && printf '\n'; done < /usr/Ports/packages.db"
+            count_single_pkg SerenityOS 0 sh -c "while IFS=" " read -r type _; do [ \"\$type\" != dependency ] && printf '\n'; done < /usr/Ports/packages.db"
         ;;
     esac
 
     # package managers that are on many different systems
-    has cargo      && get_single_pkg cargo cargo install --list | grep -v '^ '
-    has pipx       && get_single_pkg pipx pipx list
+    has cargo      && count_single_pkg cargo 0 sh -c 'cargo install --list | grep -v "^ "'
+    has pipx       && count_single_pkg pipx 0 pipx list
 
     case $total_pkgs in
         (1?*|[2-9]*)
@@ -762,39 +796,56 @@ get_memory() {
         # MemUsed = MemTotal + Shmem - MemFree - Buffers - Cached - SReclaimable
         # Source: https://github.com/KittyKatt/screenFetch/issues/386
         (Linux*|CYGWIN*|MSYS*|MINGW*|Windows_NT)
-            # Parse the '/proc/meminfo' file splitting on ':' and 'k'.
-            # The format of the file is 'key:   000kB' and an additional
-            # split is used on 'k' to filter out 'kB'.
-            while IFS=':k '  read -r key val _; do
-                case $key in
-                    (MemTotal)
-                        mem_used=$((mem_used + val))
-                        mem_full=$val
-                    ;;
+            if [ -f /proc/meminfo ]; then
+                # Parse the '/proc/meminfo' file splitting on ':' and 'k'.
+                # The format of the file is 'key:   000kB' and an additional
+                # split is used on 'k' to filter out 'kB'.
+                while IFS=':k '  read -r key val _; do
+                    case $key in
+                        (MemTotal)
+                            mem_used=$((mem_used + val))
+                            mem_full=$val
+                        ;;
 
-                    (Shmem)
-                        mem_used=$((mem_used + val))
-                    ;;
+                        (Shmem)
+                            mem_used=$((mem_used + val))
+                        ;;
 
-                    (MemFree | Buffers | Cached | SReclaimable)
-                        mem_used=$((mem_used - val))
-                    ;;
+                        (MemFree | Buffers | Cached | SReclaimable)
+                            mem_used=$((mem_used - val))
+                        ;;
 
-                esac
-            done < /proc/meminfo
+                    esac
+                done < /proc/meminfo
 
-            mem_used=$((mem_used / 1024))
-            mem_full=$((mem_full / 1024))
+                mem_used=$((mem_used / 1024))
+                mem_full=$((mem_full / 1024))
+            elif has free; then
+                # parse the output of 'free -m'
+                {
+                    read -r _ mem_full mem_used _ # discard the first line
+                    read -r _ mem_full mem_used _
+                } <<-EOF
+                    $(free -m)
+				EOF
+            fi
         ;;
 
         # Used memory is calculated using the following "formula":
         # (app + wired + occupied) * pagesize / 1024 / 1024
         (Darwin*)
-            hw_pagesize="$(sysctl -n hw.pagesize)"
-            mem_full=$(($(sysctl -n hw.memsize) / 1024 / 1024))
-            pages_used="$(($(sysctl -n vm.page_pageable_internal_count) - $(sysctl -n vm.page_purgeable_count)))"
+            # Some older jailbroken iOS devices don't have 'vm_stat'.
+            has vm_stat || return
 
-            # Parse the 'vmstat' file splitting on ':' and '.'.
+            # Older kernels don't have 'vm.page_pageable_internal_count'.
+            p=$(sysctl -n vm.page_pageable_internal_count 2>/dev/null)
+            [ -z "$p" ] && return
+
+            mem_full=$(($(sysctl -n hw.memsize) / 1024 / 1024))
+            hw_pagesize="$(sysctl -n hw.pagesize)"
+            pages_used=$((p - $(sysctl -n vm.page_purgeable_count)))
+
+            # Parse the 'vm_stat' file splitting on ':' and '.'.
             # The format of the file is 'key:   000.' and an additional
             # split is used on '.' to filter it out.
             while IFS=:. read -r key val; do
@@ -928,8 +979,8 @@ get_memory() {
             hw_pagesize=$(pagesize)
 
             # 'kstat' outputs memory in the following format:
-            # unix:0:system_pages:pagestotal	1046397
-            # unix:0:system_pages:pagesfree		885018
+            # unix:0:system_pages:pagestotal    1046397
+            # unix:0:system_pages:pagesfree     885018
             #
             # This simply uses the first "element" (white-space
             # separated) as the key and the second element as the
@@ -1005,7 +1056,7 @@ get_memory() {
         ;;
     esac
 
-    log memory "${mem_used:-?}M / ${mem_full:-?}M" >&6
+    [ -n "$mem_used" ] && [ -n "$mem_full" ] && log memory "${mem_used}M / ${mem_full}M" >&6
 }
 
 get_disk() {
@@ -1015,6 +1066,17 @@ get_disk() {
     df_version=$(df --version 2>&1)
 
     case $df_version in
+        # The 'df' command from GNU coreutils works with the generic
+        # flags at the bottom of the case statement in most scenarios,
+        # but on Cygwin/MSYS2 the 'source' entry can have spaces if the
+        # Windows path to the Cygwin/MSYS2 installation contains spaces,
+        # breaking the parsing of the 'df' output.
+        # Using the --output flag with a layout that doesn't include the
+        # source path is a workaround for this issue.
+        *GNU*)
+            set -- -h --output=target,size,used,avail,pcent
+        ;;
+
         # The 'df' command is from AIX.
         *IMitv*)
             set -- -P -g
@@ -1033,24 +1095,24 @@ get_disk() {
         # The 'df' command is from Haiku and is wildly
         # different and provides no workable output,
         # end here.
-        *Tracker*) # Haiku
+        *Tracker*)
             return
         ;;
 
-        # From testing it is saffe to assume that
+        # From testing it is safe to assume that
         # any other 'df' version provides these flags.
         *)
             set -- -P -h
-		;;
+        ;;
     esac
 
     # The main mount point to be checked by 'df'
     if [ -z "$PF_DISKPATH" ]; then
         case "$distro" in
-            iOS*)     "/private/var"      ;;
-            Android*) "/data" ;;
+            iOS*)     PF_DISKPATH="/private/var" ;;
+            Android*) PF_DISKPATH="/data"        ;;
+            *)        PF_DISKPATH="/"            ;;
         esac
-        PF_DISKPATH="${_:-'/'}"
     fi
 
     # Read the output of 'df' line by line. The first line
@@ -1060,32 +1122,22 @@ get_disk() {
     # The next lines are then split to grab the relevant
     # information and thankfully the output remains the
     # same between all but one 'df' implementation.
-    #
-    # TODO: Configure disks to send to 'df'. Do we need to
-    #       do this? I'd love to _not_ do it.
-	df "$@" "$PF_DISKPATH" | while read -r name full used _ perc _; do
-		[ "$header" ] || { header=1; continue; }
+    {
+        read -r _ # discard the first line
+        read -r name full used _ perc _
 
-		case $df_version in
-			# The 'df' command is from IRIX.
-			*befhikm*)
-				used=$((used/1024/1024))G
-				full=$((full/1024/1024))G
-			;;
-		esac
-		#
-		# probably a better way to do this, but a simple fixs
-		case $os in
-			CYGWIN*|MSYS*|MINGW*|Windows_NT)
-				windisk=$(df -h | tail -n +2 | awk 'NR==1{print $4" / "$3,"("$6")"}')
-				log disk "$windisk" >&6
-			;;
-			*)
-				log disk "$used / $full ($perc)" >&6
-			;;
-		esac
-	done
+        case $df_version in
+            # The 'df' command is from IRIX.
+            *befhikm*)
+                used=$((used / 1024 / 1024))G
+                full=$((full / 1024 / 1024))G
+            ;;
+        esac
+    } <<-EOF
+        $(df "$@" "$PF_DISKPATH")
+	EOF
 
+    log disk "$used / $full ($perc)" >&6
 }
 
 get_wm() {
@@ -1183,14 +1235,15 @@ get_wm() {
                     # don't set '_NET_WM_NAME'.
                     while read -r ps_line; do
                         case $ps_line in
-                            (*catwm*)     wm=catwm ;;
-                            (*fvwm*)      wm=fvwm ;;
-                            (*dwm*)       wm=dwm ;;
-                            (*2bwm*)      wm=2bwm ;;
-                            (*monsterwm*) wm=monsterwm ;;
+                            (*catwm*)     wm=catwm          ;;
+                            (*fvwm*)      wm=fvwm           ;;
+                            (*dwm*)       wm=dwm            ;;
+                            (*2bwm*)      wm=2bwm           ;;
+                            (*monsterwm*) wm=monsterwm      ;;
                             (*wmaker*)    wm='Window Maker' ;;
-                            (*sowm*)      wm=sowm ;;
-							(*penrose*)   wm=penrose ;;
+                            (*sowm*)      wm=sowm           ;;
+                            (*penrose*)   wm=penrose        ;;
+                            (*Hyprland*)  wm=Hyprland       ;;
                         esac
                     done <<-EOF
                         $(ps x)
@@ -1231,7 +1284,7 @@ get_term() {
     log term "${TERMINAL:-$TERM}" >&6
 }
 
-get_res() {
+get_resolution() {
     case $os in
         Linux*|GNU*|*BSD*)
             if has xdpyinfo; then
@@ -1246,11 +1299,14 @@ get_res() {
             fi
         ;;
         Darwin*)
-            resolution=$(system_profiler SPDisplaysDataType | grep Resolution | awk '{print $2 "x" $4}')
+            has system_profiler && resolution=$(system_profiler SPDisplaysDataType | grep Resolution | awk '{print $2 "x" $4}')
+        ;;
+        CYGWIN*|MSYS*|MINGW*|Windows_NT)
+            resolution="$(wmic_read path Win32_VideoController get CurrentHorizontalResolution)x$(wmic_read path Win32_VideoController get CurrentVerticalResolution)"
         ;;
     esac
 
-    log res "$resolution" >&6
+    log resolution "$resolution" >&6
 }
 
 get_palette() {
@@ -1316,6 +1372,21 @@ get_ascii() {
     # False positive.
     # shellcheck disable=2154
     case ${1:-${PF_ASCII:-${distro:-$os}}} in
+        [Aa]lma*)
+            read_ascii 3 <<- EOF
+				${c1}    {#@ .,  ${c3} 	,..<.
+				${c1}    ._\`=#  ${c3}/#=#,""
+				${c1}   \\##  \` ${c3}|\`  '=##
+				${c4}   .${c1}\`'=.  ${c3}\\  ${c2},_,.,
+				${c4} .."#-   ${c1}\`  ${c2}\`    \\##
+				${c4}\## #   ./  ${c6}\\.  ${c2}.#\`,+
+				${c4}   =##=' ${c6},   |, ${c2}|# ""
+				${c6}       =##=++#|
+				${c6}         ##\\''
+				${c6}         \`'\`
+			EOF
+        ;;
+
         ([Aa]lpine*)
             read_ascii 4 <<-EOF
 				${c4}   /\\ /\\
@@ -1545,7 +1616,7 @@ get_ascii() {
 			EOF
         ;;
 
-        ([Ff]edora*|[Nn]obara*)
+        ([Ff]edora*)
             read_ascii 4 <<-EOF
 				        ${c4},'''''.
 				       ${c4}|   ,.  |
@@ -1595,19 +1666,14 @@ get_ascii() {
 			EOF
         ;;
 
-        ([Gg][Nn][Uu]*)
-            read_ascii 3 <<-EOF
-				${c2}    _-\`\`-,   ,-\`\`-_
-				${c2}  .'  _-_|   |_-_  '.
-				${c2}./    /_._   _._\\    \\.
-				${c2}:    _/_._\`:'_._\\_    :
-				${c2}\\:._/  ,\`   \\   \\ \\_.:/
-				${c2}   ,-';'.@)  \\ @) \\
-				${c2}   ,'/'  ..- .\\,-.|
-				${c2}   /'/' \\(( \\\` ./ )
-				${c2}    '/''  \\_,----'
-				${c2}      '/''   ,;/''
-				${c2}         \`\`;'
+        ([Gg][Nn][Uu]*|[Hh]urd*)
+            read_ascii 7 <<-EOF
+				${c7} ---${c3}[ ]${c7}<----
+				${c7} v   |      |
+				${c3}[ ]${c7}  --->${c3}[ ]${c7}|
+				${c7} ^        | |
+				${c7} |  ${c3}[ ]${c7}---|--
+				${c7}  ---------
 			EOF
         ;;
 
@@ -1636,7 +1702,7 @@ get_ascii() {
 			EOF
         ;;
 
-        ([Hh]ydroOS*)
+        ([Hh]ydro[Oo][Ss]*)
 			read_ascii 4 <<-EOF
 				${c1}╔╗╔╗──╔╗───╔═╦══╗
 				${c1}║╚╝╠╦╦╝╠╦╦═╣║║══╣
@@ -1842,6 +1908,20 @@ get_ascii() {
 			EOF
         ;;
 
+        [Nn]obara*)
+            read_ascii 4 <<- EOF
+				${c7} _._.  _..,._
+				${c7}|##############.
+				${c7}|################.
+				${c7}|#####/  .  \\#####.
+				${c7}|####|  ###   > ###
+				${c7}|#####  \`\`\`  |#####
+				${c7}|######==_   |#####
+				${c7}|######"##|  |#####
+				${c7} \`""\`\`    '  \`\\##/
+			EOF
+        ;;
+
         ([Oo]pen[Bb][Ss][Dd]*)
             read_ascii 3 <<-EOF
 				${c3}      _____
@@ -1886,6 +1966,18 @@ get_ascii() {
 				${c1}|  |  |  |.----.|  |_
 				${c1}|  |  |  ||   _||   _|
 				${c1}|________||__|  |____|
+			EOF
+        ;;
+
+        [Oo]racle*)
+        read_ascii 1 <<- EOF
+				${c1}     ___________
+				${c1} ./##+++++++++++##\\.
+				${c1}/#/               \\#\\
+				${c1}|#|               |#|
+				${c1}\\#\\               /#/
+				${c1} "##.............##"
+				${c1}   \`'''''''''''''\`
 			EOF
         ;;
 
@@ -1971,6 +2063,21 @@ get_ascii() {
 			EOF
         ;;
 
+        [Ss]team*)
+            read_ascii 5 <<- EOF
+				${c5}        ____
+				${c5}    .=+#######=.
+				${c5}  ;########-"""-#\\.
+				${c5} ###${c7}####${c5}#/ .'\`'.'##.
+				${c7}:########  |   | ${c5}|##
+				${c7}\`''"=#='    \`'\`,.##${c5}#
+				${c7}      \`'.  .+#######
+				${c7}\`##.  .." #########
+				${c7}  '=#=.,+########"
+				${c7}    \`"=######="\`
+			EOF
+        ;;
+
         ([Ss]un[Oo][Ss]|[Ss]olaris*)
             read_ascii 3 <<-EOF
 				${c3}       .   .;   .
@@ -1989,6 +2096,20 @@ get_ascii() {
 				${c3}(_) |   |
 				 ${c3} \\  --- _/
 				    ${c3} ---(_)
+			EOF
+        ;;
+
+        [Vv]anilla*)
+            read_ascii 3 <<- EOF
+				${c3}        .#.
+				${c3}       :#=#:
+				${c3}.#=":.:##=##:.:"=#.
+				${c3}\`:#=#####=####=##:\`
+				${c3} \`:####=\` \`=####:\`
+				${c3}   .:##,. .,##:.
+				${c3}  :##=##:-:##=##:
+				${c3} .#=##:\`   \`:##=#.
+				${c3}  \`\`           \`\`
 			EOF
         ;;
 
@@ -2070,7 +2191,7 @@ get_ascii() {
 main() {
     case $* in
         -v|--version)
-            printf '%s\n' "${0##*/} 1.0 (Un1q32 fork)"
+            printf '%s 1.0.1\n' "${0##*/}"
             return 0
         ;;
 
@@ -2083,11 +2204,11 @@ main() {
         ;;
 
         *)
-            printf '%s' "\
+            cat <<EOF
 ${0##*/}     show system information
-${0##*/} -d  show stderr (debug mode)
-${0##*/} -v  show version information
-"
+${0##*/} -d  debug mode
+${0##*/} -v  show version
+EOF
             return 0
         ;;
     esac
@@ -2102,7 +2223,7 @@ ${0##*/} -v  show version information
     # Allow the user to execute their own script and modify or
     # extend pfetch's behavior.
     # shellcheck source=/dev/null
-    ! [ -f "$PF_SOURCE" ] || . "$PF_SOURCE"
+    [ -f "$PF_SOURCE" ] && . "$PF_SOURCE"
 
     # Ensure that the 'TMPDIR' is writable as heredocs use it and
     # fail without the write permission. This was found to be the
@@ -2136,6 +2257,7 @@ ${0##*/} -v  show version information
 
     # Allow the user to specify the order and inclusion of information
     # functions through the 'PF_INFO' environment variable.
+    [ "$PF_INFO" = "all" ] && PF_INFO="ascii title os host kernel uptime pkgs memory disk wm de shell editor term resolution palette"
     # shellcheck disable=2086
     {
         # Disable globbing and set the positional parameters to the
