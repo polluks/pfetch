@@ -48,14 +48,9 @@ esc_p() {
 }
 
 # This is just a simple wrapper around 'command -v' to avoid
-# spamming '>/dev/null' throughout this function. This also guards
-# against aliases and functions.
+# spamming '>/dev/null' throughout the script.
 has() {
-    _cmd=$(command -v "$1") 2>/dev/null || return 1
-    # busybox-w32's shell doesn't return a full path for builtin applets,
-    # causing a false negative. This is a workaround for that.
-    [ "$os" = "Windows_NT" ] && return 0
-    [ -x "$_cmd" ] || return 1
+    command -v "$1" >/dev/null 2>&1
 }
 
 log() {
@@ -177,7 +172,7 @@ wmic_read() {
             fi
         done
     } <<-EOF
-		$(wmic "$@")
+		$(wmic.exe "$@")
 	EOF
 }
 
@@ -260,8 +255,8 @@ get_os() {
             # This applies only to distributions which follow the standard
             # by shipping unmodified identification files and packages
             # from their respective upstreams.
-            if has lsb_release; then
-                distro=$(lsb_release -sd)
+            if has lsb_release && distro=$(lsb_release -sd); then
+                :
 
             # Android detection works by checking for the existence of
             # the following two directories. I don't think there's a simpler
@@ -303,14 +298,8 @@ get_os() {
                 ;;
             esac
 
-            # Check to see if Linux is running in Windows under
-            # WSL1 (Windows subsystem for Linux [version 1]) and
-            # append a string accordingly.
-            #
-            # If the kernel version string ends in "-Microsoft",
-            # we're very likely running under Windows in WSL1.
-            if [ -n "$WSLENV" ]; then
-                distro="${distro}${WSLENV+ on Windows [WSL2]}"
+            # If the distribution is still unknown, use the os name.
+            [ -n "$distro" ] || distro="$os"
 
             # Check to see if Linux is running in Windows under
             # WSL2 (Windows subsystem for Linux [version 2]) and
@@ -319,6 +308,20 @@ get_os() {
             # This checks to see if '$WSLENV' is defined. This
             # appends the Windows string even if '$WSLENV' is
             # empty. We only need to check that is has been _exported_.
+            if [ -n "$WSLENV" ]; then
+                distro="${distro}${WSLENV+ on Windows [WSL2]}"
+
+            # If the kernel version string ends in "-WSL2",
+            # we're very likely running under Windows in WSL2.
+            elif [ -z "${kernel%%*-WSL2}" ]; then
+                distro="$distro on Windows [WSL2]"
+
+            # Check to see if Linux is running in Windows under
+            # WSL1 (Windows subsystem for Linux [version 1]) and
+            # append a string accordingly.
+            #
+            # If the kernel version string ends in "-Microsoft",
+            # we're very likely running under Windows in WSL1.
             elif [ -z "${kernel%%*-Microsoft}" ]; then
                 distro="$distro on Windows [WSL1]"
             fi
@@ -382,6 +385,7 @@ get_os() {
                 (12*)    distro="macOS $mac_version Monterey"        ;;
                 (13*)    distro="macOS $mac_version Ventura"         ;;
                 (14*)    distro="macOS $mac_version Sonoma"          ;;
+                (15*)    distro="macOS $mac_version Sequoia"         ;;
                 (*)      distro="macOS $mac_version"                 ;;
             esac
 
@@ -472,7 +476,7 @@ get_host() {
             host="$name $version $model"
         ;;
 
-        (Darwin* | FreeBSD* | DragonFly*)
+        (Darwin*|FreeBSD*|DragonFly*)
             case $distro in
                 iOS*) host=$(uname -m)           ;;
                 *)    host=$(sysctl -n hw.model) ;;
@@ -485,10 +489,10 @@ get_host() {
         ;;
 
         (OpenBSD*)
-            host=$(sysctl -n hw.version)
+            host="$(sysctl -n hw.product) $(sysctl -n hw.version)"
         ;;
 
-        (*BSD* | Minix)
+        (*BSD*|Minix)
             host=$(sysctl -n hw.vendor hw.product)
         ;;
         (CYGWIN*|MSYS*|MINGW*|Windows_NT)
@@ -719,7 +723,7 @@ get_pkgs() {
             has apk        && count_single_pkg apk 0 apk_pkg_count
             has guix       && count_single_pkg guix 0 guix package --list-installed
             has opkg       && count_single_pkg opkg 0 opkg list-installed
-            has radula     && count_single_pkg radula 0 radula -ch
+            has rad        && count_single_pkg rad 0 rad -cl
             has flatpak    && count_single_pkg flatpak 0 flatpak list
             has snap       && count_single_pkg snap 0 snap list
             has urpmq      && count_single_pkg urpmq 0 urpmq --list-media active
@@ -728,7 +732,8 @@ get_pkgs() {
             # Directories containing packages.
             has kiss       && count_single_pkg kiss 0 printf '%s\n' /var/db/kiss/installed/*/
             has cpt-list   && count_single_pkg cpt-list 0 printf '%s\n' /var/db/cpt/installed/*/
-            has brew       && count_single_pkg homebrew 0 printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
+            has brew       && count_single_pkg homebrew 0 \
+                printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
             has emerge     && count_single_pkg portage 0 printf '%s\n' /var/db/pkg/*/*/
             has pkgtool    && count_single_pkg pkgtool 0 printf '%s\n' /var/log/packages/*
             has eopkg      && count_single_pkg eopkg 0 printf '%s\n' /var/lib/eopkg/package/*
@@ -745,7 +750,7 @@ get_pkgs() {
                 count_single_pkg scoop 1 printf '%s\n' "$scoopapps"/*
             }
             has winget     && count_single_pkg winget 0 winget list
-            has chocolatey && count_single_pkg chocolatey 0 choco list --local-only
+            has choco      && count_single_pkg chocolatey 2 choco list
             has pacman-key && count_single_pkg pacman 0 pacman -Qq
         ;;
 
@@ -755,7 +760,8 @@ get_pkgs() {
             has dpkg       && count_single_pkg dpkg 0 dpkg-query -f '.\n' -W
 
             # Directories containing packages.
-            has brew       && count_single_pkg homebrew 0 printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
+            has brew       && count_single_pkg homebrew 0 \
+                printf '%s\n' "$(brew --cellar)/"* "$(brew --caskroom)/"*
 
             # 'port' prints a single line of output to 'stdout'
             # when no packages are installed and exits with
@@ -766,7 +772,7 @@ get_pkgs() {
             # in this case to allow scripts to cleanly handle
             # this behavior.
             has port       && {
-                pkg_list=$(port installed)
+                pkg_list=$(port installed 2>/dev/null)
 
                 case "$pkg_list" in
                     ("No ports are installed.")
@@ -1095,7 +1101,8 @@ get_memory() {
         ;;
     esac
 
-    [ -n "$mem_used" ] && [ -n "$mem_full" ] && log memory "${mem_used}M / ${mem_full}M" >&6
+    [ -n "$mem_used" ] && [ -n "$mem_full" ] && \
+        log memory "${mem_used}M / ${mem_full}M" >&6
 }
 
 get_disk() {
@@ -1362,7 +1369,9 @@ get_resolution() {
             fi
         ;;
         CYGWIN*|MSYS*|MINGW*|Windows_NT)
-            resolution="$(wmic_read path Win32_VideoController get CurrentHorizontalResolution)x$(wmic_read path Win32_VideoController get CurrentVerticalResolution)"
+            width=$(wmic_read path Win32_VideoController get CurrentHorizontalResolution)
+            height=$(wmic_read path Win32_VideoController get CurrentVerticalResolution)
+            resolution="${width}x${height}"
         ;;
     esac
 
@@ -2279,11 +2288,9 @@ main() {
         ;;
 
         *)
-            cat <<EOF
-${0##*/}     show system information
-${0##*/} -d  debug mode
-${0##*/} -v  show version
-EOF
+            printf '%s\n' "${0##*/}     show system information"
+            printf '%s\n' "${0##*/} -d  debug mode"
+            printf '%s\n' "${0##*/} -v  show version"
             return 0
         ;;
     esac
@@ -2332,7 +2339,8 @@ EOF
 
     # Allow the user to specify the order and inclusion of information
     # functions through the 'PF_INFO' environment variable.
-    [ "$PF_INFO" = "all" ] && PF_INFO="ascii title os host kernel uptime pkgs memory disk wm de shell editor term resolution palette"
+    [ "$PF_INFO" = "all" ] && \
+        PF_INFO="ascii title os host kernel uptime pkgs memory disk wm de shell editor term resolution palette"
     # shellcheck disable=2086
     {
         # Disable globbing and set the positional parameters to the
@@ -2344,7 +2352,7 @@ EOF
         # "info names" for output alignment. The option names and subtitles
         # match 1:1 so this is thankfully simple.
         for info do
-            command -v "get_$info" >/dev/null || continue
+            has "get_$info" || continue
 
             # This was a ternary operation but they aren't supported in
             # Minix's shell.
