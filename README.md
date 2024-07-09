@@ -32,7 +32,7 @@ picture"!
 - **BSD**
     - DragonflyBSD, FreeBSD, NetBSD and OpenBSD.
 - **Windows**
-    - Windows subsystem for Linux, Cygwin, MSYS and MinGW.
+    - WSL, Cygwin, MSYS and MinGW.
 - **Haiku**
 - **macOS**
 - **Minix**
@@ -141,7 +141,7 @@ PF_PACKAGE_MANAGERS="on"
 
 # Disable individial package managers
 # Default: unset (none)
-# Valid: package manager name (first arguement passed to the count_single_pkg function)
+# Valid: package manager name (first arguement passed to the count_pkg function)
 PF_DISABLED_PACKAGE_MANAGERS=""
 
 # Mount point for the disk you want to display in disk info
@@ -153,6 +153,4 @@ PF_DISKPATH="/"
 ## Credit
 
 - [ufetch](https://gitlab.com/jschx/ufetch): Lots of ASCII logos.
-    - Contrary to the belief of a certain youtuber, `pfetch` shares **zero** code with `ufetch`. Only some of the ASCII logos were used.
-
 - [pfetch-rs](https://github.com/Gobidev/pfetch-rs): Some ASCII logos.
