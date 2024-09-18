@@ -181,8 +181,17 @@ wmic_read() {
 
 get_title() {
     # Username is retrieved by first checking '$USER' with a fallback
-    # to the 'id -un' command.
-    user=${USER:-$(id -un)}
+    # to the 'id -un' command, then to the 'whoami' command, and finally
+    # to 'unknown'.
+    if [ -n "$USER" ]; then
+        user="$USER"
+    elif has id; then
+        user=$(id -un)
+    elif has whoami; then
+        user=$(whoami)
+    else
+        user="unknown"
+    fi
 
     # Hostname is retrieved by first checking '$HOSTNAME' with a fallback
     # to the 'hostname' command, then to the '/etc/hostname' file, and finally
@@ -564,7 +573,7 @@ get_uptime() {
         (Linux*|Minix*|GNU*|SerenityOS*|CYGWIN*|MSYS*|MINGW*|Windows_NT|NetBSD*)
             if [ -r /proc/uptime ]; then
                 IFS=. read -r s _ < /proc/uptime
-            else
+            elif has uptime && has date; then
                 boot=$(date -d"$(uptime -s)" +%s)
                 now=$(date +%s)
                 s=$((now - boot))
@@ -635,6 +644,9 @@ get_uptime() {
             s=$((${d:-0}*86400 + ${h:-0}*3600 + ${t%%:*}*60 + ${t#*:}))
         ;;
     esac
+
+    # End here if the uptime is empty.
+    [ -n "$s" ] || return
 
     # Convert the uptime from seconds into days, hours and minutes.
     d=$((s / 60 / 60 / 24))
@@ -938,7 +950,7 @@ get_memory() {
                     read -r _ mem_full mem_used _ # discard the first line
                     read -r _ mem_full mem_used _
                 } <<-EOF
-                    $(free -m)
+					$(free -m)
 				EOF
             fi
         ;;
@@ -1481,6 +1493,21 @@ get_editor() {
 
 get_term() {
     log term "${TERMINAL:-$TERM}" >&6
+}
+
+get_cpus() {
+    # Display the number of CPUs.
+    if has nproc; then
+        cpus=$(nproc)
+    else
+        case $os in
+            (Darwin*)
+                cpus=$(sysctl -n hw.ncpu)
+            ;;
+        esac
+    fi
+
+    [ -n "$cpus" ] && log cpus "$cpus" >&6
 }
 
 get_resolution() {
@@ -2524,7 +2551,7 @@ ${0##*/} -v  show version
     # Allow the user to specify the order and inclusion of information
     # functions through the 'PF_INFO' environment variable.
     [ "$PF_INFO" = "all" ] &&
-        PF_INFO="ascii title os host kernel uptime pkgs memory disk wm de shell editor term resolution palette"
+        PF_INFO="ascii title os host kernel uptime pkgs memory disk wm de shell editor term resolution cpus palette"
     # shellcheck disable=2086
     {
         # Disable globbing and set the positional parameters to the
