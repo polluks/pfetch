@@ -1504,6 +1504,10 @@ get_cpus() {
             (Darwin*)
                 cpus=$(sysctl -n hw.ncpu)
             ;;
+
+            (NetBSD*)
+                cpus=$(/sbin/sysctl -n hw.ncpu)
+            ;;
         esac
     fi
 
